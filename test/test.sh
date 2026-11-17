@@ -9,7 +9,7 @@ BIN=$2
 TESTBIN=$3
 PATH=.:$PATH # Required, since BIN may be just 'pngquant'
 
-$BIN --version 2>&1 | fgrep 2.
+$BIN --version 2>&1 | grep -Eq '[0-9]+\.[0-9]+'
 $BIN --help | fgrep -q "usage:"
 
 $BIN 2>/dev/null && { echo "should fail without args"; exit 1; } || true
@@ -77,5 +77,10 @@ for job in `jobs -p`
 do
     wait $job
 done
+
+# Round-trip check of ancillary chunks, per-pixel alpha, file headers and exit codes
+if command -v python3 >/dev/null 2>&1; then
+    python3 -I "$TESTDIR/roundtrip.py" "$BIN" "$IMGSRC/metadata.png"
+fi
 
 $TESTBIN

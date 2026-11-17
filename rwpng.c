@@ -130,19 +130,28 @@ static png_bytepp rwpng_create_row_pointers(png_infop info_ptr, png_structp png_
 }
 
 #if !USE_COCOA
+struct rwpng_chunk_state {
+    struct rwpng_chunk **head;
+    int keep_color_chunks; /* also copy iCCP/cHRM/gAMA instead of letting libpng use them */
+};
+
 static int read_chunk_callback(png_structp png_ptr, png_unknown_chunkp in_chunk)
 {
-    if (0 == memcmp("iCCP", in_chunk->name, 5) ||
-        0 == memcmp("cHRM", in_chunk->name, 5) ||
-        0 == memcmp("gAMA", in_chunk->name, 5)) {
-        return 0; // not handled
+    struct rwpng_chunk_state *state = (struct rwpng_chunk_state *)png_get_user_chunk_ptr(png_ptr);
+
+    if (!state->keep_color_chunks) {
+        if (0 == memcmp("iCCP", in_chunk->name, 5) ||
+            0 == memcmp("cHRM", in_chunk->name, 5) ||
+            0 == memcmp("gAMA", in_chunk->name, 5)) {
+            return 0; // not handled
+        }
     }
 
     if (in_chunk->location == 0 ) {
         return 1; // ignore chunks with invalid location
     }
 
-    struct rwpng_chunk **head = (struct rwpng_chunk **)png_get_user_chunk_ptr(png_ptr);
+    struct rwpng_chunk **head = state->head;
 
     struct rwpng_chunk *chunk = malloc(sizeof(struct rwpng_chunk));
     memcpy(chunk->name, in_chunk->name, 5);
@@ -178,12 +187,19 @@ static void rwpng_warning_stderr_handler(png_structp png_ptr, png_const_charp ms
 static void rwpng_warning_silent_handler(png_structp png_ptr, png_const_charp msg) {
 }
 
-static pngquant_error rwpng_read_image24_libpng(FILE *infile, png24_image *mainprog_ptr, int strip, int verbose)
+static pngquant_error rwpng_read_image24_libpng(FILE *infile, png24_image *mainprog_ptr, int metadata_policy, int verbose)
 {
     png_structp  png_ptr = NULL;
     png_infop    info_ptr = NULL;
     png_size_t   rowbytes;
     int          color_type, bit_depth;
+#if defined(PNG_HANDLE_AS_UNKNOWN_SUPPORTED)
+    const int keep_metadata = (metadata_policy == RWPNG_METADATA_KEEP);
+#else
+    /* old libpng can't intercept known chunks, so full metadata
+       preservation is not possible; fall back to the default policy */
+    const int keep_metadata = 0;
+#endif
 
     png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, mainprog_ptr,
       rwpng_error_handler, verbose ? rwpng_warning_stderr_handler : rwpng_warning_silent_handler);
@@ -210,13 +226,26 @@ static pngquant_error rwpng_read_image24_libpng(FILE *infile, png24_image *mainp
 #endif
 
 #if PNG_LIBPNG_VER >= 10500 && defined(PNG_UNKNOWN_CHUNKS_SUPPORTED)
-    if (!strip) {
-        /* copy standard chunks too */
-        png_set_keep_unknown_chunks(png_ptr, PNG_HANDLE_CHUNK_IF_SAFE, (png_const_bytep)"pHYs\0iTXt\0tEXt\0zTXt", 4);
+    if (metadata_policy != RWPNG_METADATA_STRIP) {
+#if defined(PNG_HANDLE_AS_UNKNOWN_SUPPORTED)
+        if (keep_metadata) {
+            /* copy standard chunks too, including color chunks (they're
+               treated as unknown so libpng won't consume them) */
+            png_set_keep_unknown_chunks(png_ptr, PNG_HANDLE_CHUNK_ALWAYS, (png_const_bytep)"pHYs\0iTXt\0tEXt\0zTXt\0eXIf\0iCCP\0cHRM\0gAMA\0sRGB", 9);
+        } else
+#endif
+        {
+            /* copy standard chunks too */
+            png_set_keep_unknown_chunks(png_ptr, PNG_HANDLE_CHUNK_IF_SAFE, (png_const_bytep)"pHYs\0iTXt\0tEXt\0zTXt\0eXIf", 5);
+        }
     }
 #endif
-    if (!strip) {
-        png_set_read_user_chunk_fn(png_ptr, &mainprog_ptr->chunks, read_chunk_callback);
+    struct rwpng_chunk_state chunk_state = {
+        .head = &mainprog_ptr->chunks,
+        .keep_color_chunks = keep_metadata,
+    };
+    if (metadata_policy != RWPNG_METADATA_STRIP) {
+        png_set_read_user_chunk_fn(png_ptr, &chunk_state, read_chunk_callback);
     }
 
     struct rwpng_read_data read_data = {infile, 0};
@@ -259,7 +288,25 @@ static pngquant_error rwpng_read_image24_libpng(FILE *infile, png24_image *mainp
 
     /* get source gamma for gamma correction, or use sRGB default */
     double gamma = 0.45455;
-    if (png_get_valid(png_ptr, info_ptr, PNG_INFO_sRGB)) {
+    if (keep_metadata) {
+        /* color chunks were copied as unknown chunks, so libpng hasn't
+           parsed them; find the gamma in the copied chunks instead */
+        mainprog_ptr->input_color = RWPNG_KEEP;
+        mainprog_ptr->output_color = RWPNG_KEEP;
+        for(struct rwpng_chunk *chunk = mainprog_ptr->chunks; chunk; chunk = chunk->next) {
+            if (0 == memcmp("gAMA", chunk->name, 5) && chunk->size == 4) {
+                unsigned long g = ((unsigned long)chunk->data[0] << 24) |
+                                  ((unsigned long)chunk->data[1] << 16) |
+                                  ((unsigned long)chunk->data[2] << 8) |
+                                  (unsigned long)chunk->data[3];
+                double file_gamma = g / 100000.0;
+                if (file_gamma > 0 && file_gamma <= 1.0) {
+                    gamma = file_gamma;
+                }
+                break;
+            }
+        }
+    } else if (png_get_valid(png_ptr, info_ptr, PNG_INFO_sRGB)) {
         mainprog_ptr->input_color = RWPNG_SRGB;
         mainprog_ptr->output_color = RWPNG_SRGB;
     } else {
@@ -309,6 +356,7 @@ static pngquant_error rwpng_read_image24_libpng(FILE *infile, png24_image *mainp
     png_read_end(png_ptr, NULL);
 
 #if USE_LCMS
+  if (!keep_metadata) {
 #if PNG_LIBPNG_VER < 10500
     png_charp ProfileData;
 #else
@@ -400,6 +448,7 @@ static pngquant_error rwpng_read_image24_libpng(FILE *infile, png24_image *mainp
 
         mainprog_ptr->gamma = 0.45455;
     }
+  }
 #endif
 
     png_destroy_read_struct(&png_ptr, &info_ptr, NULL);
@@ -442,9 +491,10 @@ void rwpng_free_image8(png8_image *image)
     image->chunks = NULL;
 }
 
-pngquant_error rwpng_read_image24(FILE *infile, png24_image *out, int strip, int verbose)
+pngquant_error rwpng_read_image24(FILE *infile, png24_image *out, int metadata_policy, int verbose)
 {
 #if USE_COCOA
+    (void)metadata_policy;
     rwpng_rgba *pixel_data;
     pngquant_error res = rwpng_read_image32_cocoa(infile, &out->width, &out->height, &out->file_size, &pixel_data);
     if (res != SUCCESS) {
@@ -460,7 +510,7 @@ pngquant_error rwpng_read_image24(FILE *infile, png24_image *out, int strip, int
     }
     return SUCCESS;
 #else
-    return rwpng_read_image24_libpng(infile, out, strip, verbose);
+    return rwpng_read_image24_libpng(infile, out, metadata_policy, verbose);
 #endif
 }
 
@@ -513,6 +563,9 @@ static void rwpng_write_end(png_infopp info_ptr_p, png_structpp png_ptr_p, png_b
 
 static void rwpng_set_gamma(png_infop info_ptr, png_structp png_ptr, double gamma, rwpng_color_transform color)
 {
+    if (color == RWPNG_KEEP) {
+        return; // original gAMA/sRGB/iCCP chunks are copied verbatim
+    }
     if (color != RWPNG_GAMA_ONLY && color != RWPNG_NONE) {
         png_set_gAMA(png_ptr, info_ptr, gamma);
     }
@@ -560,6 +613,13 @@ pngquant_error rwpng_write_image8(FILE *outfile, png8_image *mainprog_ptr)
     struct rwpng_chunk *chunk = mainprog_ptr->chunks;
     mainprog_ptr->metadata_size = 0;
     int chunk_num=0;
+#if defined(PNG_HANDLE_AS_UNKNOWN_SUPPORTED)
+    if (chunk) {
+        /* chunks are copied deliberately, so write them all, even ones that
+           aren't marked safe-to-copy (e.g. iCCP, gAMA, cHRM, sRGB) */
+        png_set_keep_unknown_chunks(png_ptr, PNG_HANDLE_CHUNK_ALWAYS, NULL, 0);
+    }
+#endif
     while(chunk) {
         png_unknown_chunk pngchunk = {
             .size = chunk->size,

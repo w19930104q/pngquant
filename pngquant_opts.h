@@ -19,7 +19,7 @@ struct pngquant_options {
         min_quality_limit, skip_if_larger,
         strip, iebug, last_index_transparent,
         print_help, print_version, missing_arguments,
-        verbose;
+        verbose, keep_metadata, preserve_alpha;
 };
 
 pngquant_error pngquant_parse_options(int argc, char *argv[], struct pngquant_options *options);

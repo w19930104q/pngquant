@@ -20,6 +20,9 @@ options:\n\
   --nofs            disable Floyd-Steinberg dithering\n\
   --posterize N     output lower-precision color (e.g. for ARGB4444 output)\n\
   --strip           remove optional metadata (default on Mac)\n\
+  --keep-metadata   preserve all PNG metadata chunks verbatim, including\n\
+                    iCCP/eXIf/tEXt (disables color space conversion)\n\
+  --preserve-alpha  keep fully transparent pixels fully transparent\n\
   --verbose         print status messages (synonym: -v)\n\
 \n\
 Quantizes one or more 32-bit RGBA PNGs to 8-bit (or smaller) RGBA-palette.\n\
@@ -62,7 +65,8 @@ char *PNGQUANT_VERSION = LIQ_VERSION_STRING " (January 2022)";
 
 static pngquant_error prepare_output_image(liq_result *result, liq_image *input_image, rwpng_color_transform tag, png8_image *output_image);
 static void set_palette(liq_result *result, png8_image *output_image);
-static pngquant_error read_image(liq_attr *options, const char *filename, int using_stdin, png24_image *input_image_p, liq_image **liq_image_p, bool keep_input_pixels, bool strip, bool verbose);
+static void preserve_fully_transparent_pixels(const png24_image *input_image, png8_image *output_image);
+static pngquant_error read_image(liq_attr *options, const char *filename, int using_stdin, png24_image *input_image_p, liq_image **liq_image_p, bool keep_input_pixels, int metadata_policy, bool verbose);
 static pngquant_error write_image(png8_image *output_image, png24_image *output_image24, const char *outname, struct pngquant_options *options, liq_attr *liq);
 static char *add_filename_extension(const char *filename, const char *newext);
 static bool file_exists(const char *outname);
@@ -291,6 +295,11 @@ int main(int argc, char *argv[])
         return INVALID_ARGUMENT;
     }
 
+    if (options.strip && options.keep_metadata) {
+        fputs("--strip and --keep-metadata options can't be used at the same time\n", stderr);
+        return INVALID_ARGUMENT;
+    }
+
     // new filename extension depends on options used. Typically basename-fs8.png
     if (options.extension == NULL) {
         options.extension = options.floyd > 0 ? "-fs8.png" : "-or8.png";
@@ -330,7 +339,7 @@ pngquant_error pngquant_main_internal(struct pngquant_options *options, liq_attr
 
     if (options->map_file) {
         png24_image tmp = {.width=0};
-        if (SUCCESS != read_image(liq, options->map_file, false, &tmp, &options->fixed_palette_image, true, true, false)) {
+        if (SUCCESS != read_image(liq, options->map_file, false, &tmp, &options->fixed_palette_image, true, RWPNG_METADATA_STRIP, false)) {
             fprintf(stderr, "  error: unable to load %s", options->map_file);
             return INVALID_ARGUMENT;
         }
@@ -441,9 +450,11 @@ static pngquant_error pngquant_file_internal(const char *filename, const char *o
 
     liq_image *input_image = NULL;
     png24_image input_image_rwpng = {.width=0};
-    bool keep_input_pixels = options->skip_if_larger || (options->using_stdout && options->min_quality_limit); // original may need to be output to stdout
+    bool keep_input_pixels = options->skip_if_larger || (options->using_stdout && options->min_quality_limit) || options->preserve_alpha; // original may need to be output to stdout or inspected for transparency
+    const int metadata_policy = options->strip ? RWPNG_METADATA_STRIP :
+                                options->keep_metadata ? RWPNG_METADATA_KEEP : RWPNG_METADATA_DEFAULT;
     if (SUCCESS == retval) {
-        retval = read_image(liq, filename, options->using_stdin, &input_image_rwpng, &input_image, keep_input_pixels, options->strip, options->verbose);
+        retval = read_image(liq, filename, options->using_stdin, &input_image_rwpng, &input_image, keep_input_pixels, metadata_policy, options->verbose);
     }
 
     int quality_percent = 90; // quality on 0-100 scale, updated upon successful remap
@@ -459,6 +470,8 @@ static pngquant_error pngquant_file_internal(const char *filename, const char *o
             verbose_printf(liq, options, "  warning: ignored ICC profile in GRAY colorspace");
         } else if (RWPNG_COCOA == input_image_rwpng.input_color) {
             // No comment
+        } else if (RWPNG_KEEP == input_image_rwpng.input_color) {
+            verbose_printf(liq, options, "  keeping original color profile and metadata chunks");
         } else if (RWPNG_SRGB == input_image_rwpng.input_color) {
             verbose_printf(liq, options, "  passing sRGB tag from the input");
         } else if (input_image_rwpng.gamma != 0.45455) {
@@ -474,16 +487,22 @@ static pngquant_error pngquant_file_internal(const char *filename, const char *o
 
             // fixed gamma ~2.2 for the web. PNG can't store exact 1/2.2
             // NB: can't change gamma here, because output_color is allowed to be an sRGB tag
-            liq_set_output_gamma(remap, 0.45455);
+            // When the original color chunks are kept verbatim, the palette must
+            // stay in the input's gamma space to remain consistent with them.
+            liq_set_output_gamma(remap, input_image_rwpng.output_color == RWPNG_KEEP ? input_image_rwpng.gamma : 0.45455);
             liq_set_dithering_level(remap, options->floyd);
 
-            retval = prepare_output_image(remap, input_image, input_image_rwpng.output_color, &output_image);
+            retval = prepare_output_image(remap, input_image, options->strip ? RWPNG_NONE : input_image_rwpng.output_color, &output_image);
             if (SUCCESS == retval) {
                 if (LIQ_OK != liq_write_remapped_image_rows(remap, input_image, output_image.row_pointers)) {
                     retval = OUT_OF_MEMORY_ERROR;
                 }
 
                 set_palette(remap, &output_image);
+
+                if (options->preserve_alpha && input_image_rwpng.rgba_data) {
+                    preserve_fully_transparent_pixels(&input_image_rwpng, &output_image);
+                }
 
                 double palette_error = liq_get_quantization_error(remap);
                 if (palette_error >= 0) {
@@ -546,6 +565,57 @@ static void set_palette(liq_result *result, png8_image *output_image)
     for(unsigned int i=0; i < palette->count; i++) {
         const liq_color px = palette->entries[i];
         output_image->palette[i] = (rwpng_rgba){.r=px.r, .g=px.g, .b=px.b, .a=px.a};
+    }
+}
+
+/**
+ * Dithering can bleed alpha across transparency boundaries, making fully
+ * transparent pixels slightly visible. When --preserve-alpha is used, map
+ * every fully transparent input pixel to a fully transparent palette entry
+ * so transparent borders survive quantization exactly.
+ */
+static void preserve_fully_transparent_pixels(const png24_image *input_image, png8_image *output_image)
+{
+    bool any_transparent = false;
+    for(uint32_t y = 0; y < input_image->height && !any_transparent; y++) {
+        const rwpng_rgba *row = (const rwpng_rgba *)input_image->row_pointers[y];
+        for(uint32_t x = 0; x < input_image->width; x++) {
+            if (row[x].a == 0) {
+                any_transparent = true;
+                break;
+            }
+        }
+    }
+    if (!any_transparent) {
+        return;
+    }
+
+    unsigned int transparent_index = 0;
+    bool found = false;
+    for(unsigned int i = 0; i < output_image->num_palette; i++) {
+        if (output_image->palette[i].a == 0) {
+            transparent_index = i;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        if (output_image->num_palette >= 256) {
+            return; // no room for a transparent entry; leave the remap as-is
+        }
+        transparent_index = output_image->num_palette;
+        output_image->palette[transparent_index] = (rwpng_rgba){.r=0, .g=0, .b=0, .a=0};
+        output_image->num_palette++;
+    }
+
+    for(uint32_t y = 0; y < input_image->height; y++) {
+        const rwpng_rgba *in_row = (const rwpng_rgba *)input_image->row_pointers[y];
+        unsigned char *out_row = output_image->row_pointers[y];
+        for(uint32_t x = 0; x < input_image->width; x++) {
+            if (in_row[x].a == 0) {
+                out_row[x] = transparent_index;
+            }
+        }
     }
 }
 
@@ -684,7 +754,7 @@ static pngquant_error write_image(png8_image *output_image, png24_image *output_
     return retval;
 }
 
-static pngquant_error read_image(liq_attr *options, const char *filename, int using_stdin, png24_image *input_image_p, liq_image **liq_image_p, bool keep_input_pixels, bool strip, bool verbose)
+static pngquant_error read_image(liq_attr *options, const char *filename, int using_stdin, png24_image *input_image_p, liq_image **liq_image_p, bool keep_input_pixels, int metadata_policy, bool verbose)
 {
     FILE *infile;
 
@@ -699,7 +769,7 @@ static pngquant_error read_image(liq_attr *options, const char *filename, int us
     pngquant_error retval;
     #pragma omp critical (libpng)
     {
-        retval = rwpng_read_image24(infile, input_image_p, strip, verbose);
+        retval = rwpng_read_image24(infile, input_image_p, metadata_policy, verbose);
     }
 
     if (!using_stdin) {

@@ -89,6 +89,21 @@ will make almost-opaque pixels fully opaque and will reduce amount of semi-trans
 .Ql -ie-or8.png .
 .It Fl Fl strip
 Remove optional chunks (metadata) from PNG files.
+.It Fl Fl keep-metadata
+Copy all ancillary PNG chunks to the output verbatim, including
+.Cm iCCP ,
+.Cm eXIf ,
+.Cm cHRM ,
+.Cm gAMA
+and text chunks. The embedded color profile is kept as-is and no color space
+conversion is performed, so pixel values stay in the input's color space.
+Cannot be used together with
+.Fl Fl strip .
+.It Fl Fl preserve-alpha
+Guarantee that fully transparent input pixels stay fully transparent in the
+output. By default dithering may slightly raise the alpha of pixels next to
+opaque areas; this option maps every fully transparent pixel to a fully
+transparent palette entry.
 .It Fl Fl transbug
 Workaround for readers that expect fully transparent color to be the last entry in the palette.
 .It Fl v , Fl Fl verbose

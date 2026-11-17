@@ -29,6 +29,44 @@ fn unwrap_ptr(opt: Option<&CString>) -> *const c_char {
     opt.map_or(ptr::null(), |c| c.as_ptr())
 }
 
+/// Old-style single-dash long options, replaced with their modern equivalents
+/// (kept in sync with fix_obsolete_options() in pngquant_opts.c)
+const OBSOLETE_OPTIONS: &[(&str, &str)] = &[
+    ("-fs", "--floyd=1"),
+    ("-nofs", "--ordered"),
+    ("-floyd", "--floyd=1"),
+    ("-nofloyd", "--ordered"),
+    ("-ordered", "--ordered"),
+    ("-force", "--force"),
+    ("-noforce", "--no-force"),
+    ("-verbose", "--verbose"),
+    ("-quiet", "--quiet"),
+    ("-noverbose", "--quiet"),
+    ("-noquiet", "--verbose"),
+    ("-help", "--help"),
+    ("-version", "--version"),
+    ("-ext", "--ext"),
+    ("-speed", "--speed"),
+];
+
+fn fix_obsolete_options(args: &mut [String]) {
+    for arg in args.iter_mut() {
+        if !arg.starts_with('-') {
+            continue;
+        }
+        if arg.starts_with("--") {
+            break; // stop on first --option or --
+        }
+        for (old, new) in OBSOLETE_OPTIONS {
+            if arg == old {
+                eprintln!("  warning: option '{old}' has been replaced with '{new}'.");
+                *arg = new.to_string();
+                break;
+            }
+        }
+    }
+}
+
 fn print_full_version(fd: &mut dyn io::Write, c_fd: *mut FILE) {
     let _ = writeln!(fd, "pngquant, {} (Rust), by Kornel Lesinski, Greg Roelofs.", env!("CARGO_PKG_VERSION"));
     let _ = fd.flush();
@@ -96,6 +134,8 @@ fn run() -> ffi::pngquant_error {
     opts.optflag("", "transbug", "");
     opts.optflag("", "skip-if-larger", "");
     opts.optflag("", "strip", "");
+    opts.optflag("", "keep-metadata", "");
+    opts.optflag("", "preserve-alpha", "");
     opts.optflag("V", "version", "");
     opts.optflagopt("", "floyd", "0.0-1.0", "");
     opts.optopt("", "ext", "extension", "");
@@ -106,7 +146,8 @@ fn run() -> ffi::pngquant_error {
     opts.optopt("", "map", "png", "");
     opts.optopt("", "colors", "0", "");
 
-    let args: Vec<_> = wild::args().skip(1).collect();
+    let mut args: Vec<_> = wild::args().skip(1).collect();
+    fix_obsolete_options(&mut args);
     let has_some_explicit_args = !args.is_empty();
     let mut m = match opts.parse(args) {
         Ok(m) => m,
@@ -165,6 +206,8 @@ fn run() -> ffi::pngquant_error {
         force: m.opt_present("force") && !m.opt_present("no-force"),
         skip_if_larger: m.opt_present("skip-if-larger"),
         strip: m.opt_present("strip"),
+        keep_metadata: m.opt_present("keep-metadata"),
+        preserve_alpha: m.opt_present("preserve-alpha"),
         iebug: false,
         last_index_transparent: false, // handled in Rust
         print_help: m.opt_present("h"),
@@ -180,6 +223,11 @@ fn run() -> ffi::pngquant_error {
 
     if m.opt_present("nofs") || m.opt_present("ordered") {
         options.floyd = 0.;
+    }
+
+    if options.strip && options.keep_metadata {
+        eprintln!("--strip and --keep-metadata options can't be used at the same time");
+        return INVALID_ARGUMENT;
     }
 
     if options.print_version {

@@ -1,3 +1,12 @@
+unreleased
+----------
+ - added --keep-metadata to preserve all ancillary PNG chunks (iCCP, eXIf,
+   cHRM, gAMA, sRGB, text) verbatim instead of color-managing to sRGB
+ - added --preserve-alpha to keep fully transparent pixels fully transparent
+ - eXIf chunks are now copied by the default metadata policy
+ - --strip now also omits the generated gAMA/sRGB chunks
+ - the Rust CLI understands old-style single-dash options (e.g. -nofs) again
+
 version 3.0
 -----------
  - replaced C libimagequant library with a Rust imagequant crate

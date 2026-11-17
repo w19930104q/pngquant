@@ -52,7 +52,8 @@ static void fix_obsolete_options(const unsigned int argc, char *argv[])
 }
 
 enum {arg_floyd=1, arg_ordered, arg_ext, arg_no_force, arg_iebug,
-    arg_transbug, arg_map, arg_posterize, arg_skip_larger, arg_strip};
+    arg_transbug, arg_map, arg_posterize, arg_skip_larger, arg_strip,
+    arg_keep_metadata, arg_preserve_alpha};
 
 static const struct option long_options[] = {
     {"verbose", no_argument, NULL, 'v'},
@@ -71,6 +72,8 @@ static const struct option long_options[] = {
     {"quality", required_argument, NULL, 'Q'},
     {"posterize", required_argument, NULL, arg_posterize},
     {"strip", no_argument, NULL, arg_strip},
+    {"keep-metadata", no_argument, NULL, arg_keep_metadata},
+    {"preserve-alpha", no_argument, NULL, arg_preserve_alpha},
     {"map", required_argument, NULL, arg_map},
     {"version", no_argument, NULL, 'V'},
     {"help", no_argument, NULL, 'h'},
@@ -142,6 +145,14 @@ pngquant_error pngquant_parse_options(int argc, char *argv[], struct pngquant_op
 
             case arg_strip:
                 options->strip = true;
+                break;
+
+            case arg_keep_metadata:
+                options->keep_metadata = true;
+                break;
+
+            case arg_preserve_alpha:
+                options->preserve_alpha = true;
                 break;
 
             case arg_map:

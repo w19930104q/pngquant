@@ -57,7 +57,15 @@ typedef enum {
   RWPNG_GAMA_CHRM, // used gAMA and cHRM
   RWPNG_GAMA_ONLY, // used gAMA only (i.e. not sRGB)
   RWPNG_COCOA, // Colors handled by Cocoa reader
+  RWPNG_KEEP, // color chunks are copied verbatim; pixels are not color-transformed
 } rwpng_color_transform;
+
+/* Metadata policies for rwpng_read_image24() */
+enum {
+  RWPNG_METADATA_DEFAULT = 0, // keep safe ancillary chunks, color-manage to sRGB
+  RWPNG_METADATA_STRIP = 1,   // remove all optional chunks
+  RWPNG_METADATA_KEEP = 2,    // keep all ancillary chunks verbatim (incl. iCCP/eXIf), don't transform pixels
+};
 
 typedef struct {
     jmp_buf jmpbuf;
@@ -98,7 +106,7 @@ typedef union {
 
 void rwpng_version_info(FILE *fp);
 
-pngquant_error rwpng_read_image24(FILE *infile, png24_image *mainprog_ptr, int strip, int verbose);
+pngquant_error rwpng_read_image24(FILE *infile, png24_image *mainprog_ptr, int metadata_policy, int verbose);
 pngquant_error rwpng_write_image8(FILE *outfile, png8_image *mainprog_ptr);
 pngquant_error rwpng_write_image24(FILE *outfile, const png24_image *mainprog_ptr);
 void rwpng_free_image24(png24_image *);

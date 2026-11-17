@@ -66,4 +66,6 @@ pub struct pngquant_options {
     pub print_version: bool,
     pub missing_arguments: bool,
     pub verbose: bool,
+    pub keep_metadata: bool,
+    pub preserve_alpha: bool,
 }
